@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const express = require("express");
 
 const {
@@ -51,6 +52,72 @@ const MAX_GLOBAL_USERS = Number(process.env.MAX_GLOBAL_USERS || 100);
 const RTC_ADMIN_KEY = process.env.RTC_ADMIN_KEY || "";
 const PEER_SERVER_KEY = process.env.PEER_SERVER_KEY || "peerjs";
 const PEER_SERVER_PATH = normalizePeerServerPath(process.env.PEER_SERVER_PATH || "/peerjs");
+const roomPeerIds = new Map();
+
+function sanitizePeerIdPrefix(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  const normalized = raw.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return normalized || "user";
+}
+
+function createPeerId(userId) {
+  const prefix = sanitizePeerIdPrefix(userId).slice(0, 48);
+  const nonce = crypto.randomBytes(6).toString("hex");
+  return `${prefix}_${Date.now().toString(36)}_${nonce}`;
+}
+
+function getOrCreateRoomPeerMap(roomId) {
+  if (!roomPeerIds.has(roomId)) {
+    roomPeerIds.set(roomId, new Map());
+  }
+  return roomPeerIds.get(roomId);
+}
+
+function syncRoomPeerMap(roomId) {
+  const tracked = roomPeerIds.get(roomId);
+  if (!tracked) {
+    return;
+  }
+
+  const activeUsers = new Set(getRoomUsers(roomId));
+  for (const trackedUserId of tracked.keys()) {
+    if (!activeUsers.has(trackedUserId)) {
+      tracked.delete(trackedUserId);
+    }
+  }
+
+  if (tracked.size === 0 && activeUsers.size === 0) {
+    roomPeerIds.delete(roomId);
+  }
+}
+
+function setUserPeerId(roomId, userId, peerId) {
+  const roomPeerMap = getOrCreateRoomPeerMap(roomId);
+  roomPeerMap.set(userId, peerId);
+}
+
+function removeUserPeerId(roomId, userId) {
+  const roomPeerMap = roomPeerIds.get(roomId);
+  if (!roomPeerMap) {
+    return;
+  }
+
+  roomPeerMap.delete(userId);
+  if (roomPeerMap.size === 0) {
+    roomPeerIds.delete(roomId);
+  }
+}
+
+function listRoomParticipants(roomId) {
+  syncRoomPeerMap(roomId);
+  const roomUsers = getRoomUsers(roomId);
+  const roomPeerMap = roomPeerIds.get(roomId);
+
+  return roomUsers.map((participantUserId) => ({
+    userId: participantUserId,
+    peerId: roomPeerMap?.get(participantUserId) || participantUserId,
+  }));
+}
 
 function normalizePeerServerPath(path) {
   const normalized = typeof path === "string" ? path.trim() : "";
@@ -237,10 +304,12 @@ router.get("/room/:roomId/participants", (req, res) => {
   }
 
   touchUserInRoom(roomId, userId);
+  const participantEntries = listRoomParticipants(roomId);
 
   return res.status(200).json({
     roomId,
-    participants: getRoomUsers(roomId),
+    participants: participantEntries.map((entry) => entry.userId),
+    participantDetails: participantEntries,
   });
 });
 
@@ -266,12 +335,14 @@ router.post("/join", (req, res) => {
   }
 
   if (isUserInRoom(roomId, userId)) {
+    const peerId = createPeerId(userId);
+    setUserPeerId(roomId, userId, peerId);
     touchUserInRoom(roomId, userId);
 
     return res.status(200).json({
       ok: true,
       alreadyJoined: true,
-      peerId: userId,
+      peerId,
       peerConfig: getPeerConnectionConfig(),
     });
   }
@@ -294,11 +365,13 @@ router.post("/join", (req, res) => {
   }
 
   addUserToRoom(roomId, userId);
+  const peerId = createPeerId(userId);
+  setUserPeerId(roomId, userId, peerId);
 
   return res.status(200).json({
     ok: true,
     alreadyJoined: false,
-    peerId: userId,
+    peerId,
     peerConfig: getPeerConnectionConfig(),
   });
 });
@@ -311,10 +384,14 @@ router.post("/leave", (req, res) => {
 
   const { roomId, userId } = validated.value;
   const result = removeUserFromRoom(roomId, userId);
+  removeUserPeerId(roomId, userId);
 
   if (result.roomDeleted) {
+    roomPeerIds.delete(roomId);
     deleteRoomPolicy(roomId);
     clearRoomHistory(roomId);
+  } else {
+    syncRoomPeerMap(roomId);
   }
 
   return res.status(200).json({

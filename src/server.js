@@ -33,10 +33,6 @@ const FRONTEND_USERNAME = process.env.FRONTEND_USERNAME || "admin";
 const FRONTEND_PASSWORD = process.env.FRONTEND_PASSWORD || "admin123";
 const FRONTEND_SECRET = process.env.FRONTEND_SECRET || "your-secret-key-change-this";
 const AUTH_TOKEN_TTL_MS = Math.floor(toPositiveNumber(process.env.AUTH_TOKEN_TTL_MS, 12 * 60 * 60 * 1000));
-const AUTH_TOKEN_CLEANUP_INTERVAL_MS = Math.floor(
-  toPositiveNumber(process.env.AUTH_TOKEN_CLEANUP_INTERVAL_MS, 5 * 60 * 1000),
-);
-const AUTH_MAX_TOKENS = Math.max(100, Math.floor(toPositiveNumber(process.env.AUTH_MAX_TOKENS, 5000)));
 
 const RATE_LIMIT_MAX_KEYS = Math.max(100, Math.floor(toPositiveNumber(process.env.RATE_LIMIT_MAX_KEYS, 5000)));
 const GLOBAL_RATE_LIMIT_MAX_REQUESTS = Math.floor(
@@ -61,8 +57,6 @@ const RTC_PRESENCE_REAPER_INTERVAL_MS = Math.floor(
   toPositiveNumber(process.env.RTC_PRESENCE_REAPER_INTERVAL_MS, 30 * 1000),
 );
 
-const validTokens = new Map();
-let authTokenCleanupInterval = null;
 let presenceReaperInterval = null;
 
 function normalizePeerServerPath(path) {
@@ -105,43 +99,85 @@ function getTokenFromAuthorizationHeader(req) {
   return authHeader.substring(7).trim();
 }
 
-function pruneExpiredTokens(now = Date.now()) {
-  let removed = 0;
+function toBase64Url(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
-  for (const [token, tokenEntry] of validTokens.entries()) {
-    if (tokenEntry.expiresAt <= now) {
-      validTokens.delete(token);
-      removed += 1;
-    }
+function fromBase64Url(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = "=".repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(`${normalized}${padding}`, "base64").toString("utf8");
+}
+
+function signTokenPayload(payloadEncoded) {
+  return crypto
+    .createHmac("sha256", FRONTEND_SECRET)
+    .update(payloadEncoded)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function safeCompare(a, b) {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+
+  if (left.length !== right.length) {
+    return false;
   }
 
-  if (validTokens.size > AUTH_MAX_TOKENS) {
-    const overflowEntries = Array.from(validTokens.entries())
-      .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)
-      .slice(0, validTokens.size - AUTH_MAX_TOKENS);
-
-    for (const [token] of overflowEntries) {
-      validTokens.delete(token);
-      removed += 1;
-    }
-  }
-
-  return removed;
+  return crypto.timingSafeEqual(left, right);
 }
 
 function generateToken() {
-  return crypto.randomBytes(32).toString("hex");
+  const now = Date.now();
+  const payload = JSON.stringify({
+    username: FRONTEND_USERNAME,
+    iat: now,
+    exp: now + AUTH_TOKEN_TTL_MS,
+  });
+  const payloadEncoded = toBase64Url(payload);
+  const signature = signTokenPayload(payloadEncoded);
+  return `${payloadEncoded}.${signature}`;
 }
 
-function storeToken(token) {
-  const now = Date.now();
-  validTokens.set(token, {
-    createdAt: now,
-    lastSeenAt: now,
-    expiresAt: now + AUTH_TOKEN_TTL_MS,
-  });
+function verifyAuthToken(token) {
+  if (!token) {
+    return { ok: false, error: "No token provided" };
+  }
 
-  pruneExpiredTokens(now);
+  const parts = token.split(".");
+  if (parts.length !== 2) {
+    return { ok: false, error: "Invalid token" };
+  }
+
+  const [payloadEncoded, signature] = parts;
+  const expectedSignature = signTokenPayload(payloadEncoded);
+  if (!safeCompare(signature, expectedSignature)) {
+    return { ok: false, error: "Invalid token" };
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(fromBase64Url(payloadEncoded));
+  } catch {
+    return { ok: false, error: "Invalid token payload" };
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, error: "Invalid token payload" };
+  }
+
+  if (typeof payload.exp !== "number" || payload.exp <= Date.now()) {
+    return { ok: false, error: "Token expired" };
+  }
+
+  return { ok: true };
 }
 
 app.set("trust proxy", 1);
@@ -233,24 +269,11 @@ app.use(express.static(path.join(__dirname, "../public")));
 
 function verifyToken(req, res, next) {
   const token = getTokenFromAuthorizationHeader(req);
-  if (!token) {
-    return res.status(401).json({ error: "No token provided" });
+  const verification = verifyAuthToken(token);
+  if (!verification.ok) {
+    return res.status(401).json({ error: verification.error });
   }
 
-  const tokenEntry = validTokens.get(token);
-  if (!tokenEntry) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
-  const now = Date.now();
-  if (tokenEntry.expiresAt <= now) {
-    validTokens.delete(token);
-    return res.status(401).json({ error: "Token expired" });
-  }
-
-  // Sliding expiration prevents long sessions from failing due stale auth token.
-  tokenEntry.lastSeenAt = now;
-  tokenEntry.expiresAt = now + AUTH_TOKEN_TTL_MS;
   return next();
 }
 
@@ -259,7 +282,6 @@ app.post("/api/login", (req, res) => {
 
   if (username === FRONTEND_USERNAME && password === FRONTEND_PASSWORD) {
     const token = generateToken();
-    storeToken(token);
     return res.json({ token, expiresInMs: AUTH_TOKEN_TTL_MS });
   }
 
@@ -269,7 +291,7 @@ app.post("/api/login", (req, res) => {
 app.get("/api/status", verifyToken, (_req, res) => {
   res.json({
     serverStatus: "Running",
-    activeAuthTokens: validTokens.size,
+    authMode: "stateless-hmac",
   });
 });
 
@@ -277,9 +299,8 @@ app.get("/api/health", verifyToken, (_req, res) => {
   res.json({
     ...getHealthSnapshot(),
     auth: {
-      activeTokens: validTokens.size,
+      mode: "stateless-hmac",
       tokenTtlMs: AUTH_TOKEN_TTL_MS,
-      maxTokens: AUTH_MAX_TOKENS,
     },
     presence: {
       maxIdleMs: RTC_PRESENCE_MAX_IDLE_MS,
@@ -289,23 +310,11 @@ app.get("/api/health", verifyToken, (_req, res) => {
 });
 
 app.get("/api/logout", verifyToken, (req, res) => {
-  const token = getTokenFromAuthorizationHeader(req);
-  if (token) {
-    validTokens.delete(token);
-  }
-
+  void req;
   res.json({ ok: true });
 });
 
 function startMaintenanceJobs() {
-  authTokenCleanupInterval = setInterval(() => {
-    const removed = pruneExpiredTokens();
-    if (removed > 0) {
-      console.log(`[auth] cleaned ${removed} expired token(s)`);
-    }
-  }, AUTH_TOKEN_CLEANUP_INTERVAL_MS);
-  authTokenCleanupInterval.unref?.();
-
   presenceReaperInterval = setInterval(() => {
     const result = pruneInactiveParticipants({ maxIdleMs: RTC_PRESENCE_MAX_IDLE_MS });
 
@@ -358,11 +367,6 @@ peerServer.on("disconnect", (client) => {
 startMaintenanceJobs();
 
 function stopMaintenanceJobs() {
-  if (authTokenCleanupInterval) {
-    clearInterval(authTokenCleanupInterval);
-    authTokenCleanupInterval = null;
-  }
-
   if (presenceReaperInterval) {
     clearInterval(presenceReaperInterval);
     presenceReaperInterval = null;
@@ -429,7 +433,5 @@ process.on("uncaughtException", (error) => {
 process.on("unhandledRejection", (reason) => {
   console.error("Unhandled promise rejection:", reason);
 });
-
-void FRONTEND_SECRET;
 
 module.exports = app;

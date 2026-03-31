@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RTC Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>🎥 RTC Dashboard</h1>
+            <button id="logoutBtn" class="btn btn-danger">Logout</button>
+        </header>
+
+        <div class="status-section">
+            <div class="status-card status-server">
+                <div class="status-icon">🟢</div>
+                <div class="status-info">
+                    <h3>Server Status</h3>
+                    <p id="serverStatus">Checking...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon">🏠</div>
+                <div class="stat-content">
+                    <h3 id="totalRooms">0</h3>
+                    <p>Active Rooms</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">👥</div>
+                <div class="stat-content">
+                    <h3 id="totalUsers">0</h3>
+                    <p>Total Users</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="rooms-section">
+            <h2>📹 Live Meetings</h2>
+            <div id="roomsList" class="rooms-list">
+                <p class="no-data">No active meetings</p>
+            </div>
+        </div>
+
+        <div class="refresh-section">
+            <button id="refreshBtn" class="btn btn-primary">🔄 Refresh</button>
+            <p class="last-updated">Last updated: <span id="lastUpdated">Never</span></p>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

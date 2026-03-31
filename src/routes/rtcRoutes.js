@@ -20,6 +20,7 @@ const {
   validatePushUnsubscribePayload,
   validateChatSendPayload,
   validateJoinLeavePayload,
+  validateVideoSlotRequestPayload,
 } = require("../services/validationService");
 const {
   addAllowedUsersToRoomPolicy,
@@ -44,6 +45,15 @@ const {
   removeSubscription,
   upsertSubscription,
 } = require("../services/pushService");
+const {
+  normalizeRole,
+  getVideoSlotStatus,
+  requestVideoSlot,
+  acceptVideoSlotInvite,
+  releaseVideoSlot,
+  removeUserFromVideoSlotRoom,
+  deleteRoomVideoSlots,
+} = require("../services/videoSlotService");
 
 const router = express.Router();
 
@@ -136,6 +146,35 @@ function getPeerConnectionConfig() {
     key: PEER_SERVER_KEY,
     path: PEER_SERVER_PATH,
   };
+}
+
+function assertRoomMemberAccess(roomId, userId, res, options = {}) {
+  const touchPresence = options.touchPresence !== false;
+
+  if (!isUserAuthorizedForRoom(roomId, userId)) {
+    res.status(403).json({ error: "User is not authorized for this room" });
+    return false;
+  }
+
+  if (!isUserInRoom(roomId, userId)) {
+    res.status(403).json({ error: "User must join room before requesting this resource" });
+    return false;
+  }
+
+  if (touchPresence) {
+    touchUserInRoom(roomId, userId);
+  }
+
+  return true;
+}
+
+function resolveVideoSlotRole(roomId, userId, rawRole) {
+  const policy = getRoomPolicy(roomId);
+  if (policy && policy.hostUserId === userId) {
+    return "host";
+  }
+
+  return normalizeRole(rawRole);
 }
 
 function assertAdminKey(req, res) {
@@ -295,21 +334,104 @@ router.get("/room/:roomId/participants", (req, res) => {
     return res.status(400).json({ error: validated.error });
   }
 
-  if (!isUserAuthorizedForRoom(roomId, userId)) {
-    return res.status(403).json({ error: "User is not authorized for this room" });
+  if (!assertRoomMemberAccess(roomId, userId, res, { touchPresence: true })) {
+    return;
   }
 
-  if (!isUserInRoom(roomId, userId)) {
-    return res.status(403).json({ error: "User must join room before requesting participants" });
-  }
-
-  touchUserInRoom(roomId, userId);
   const participantEntries = listRoomParticipants(roomId);
 
   return res.status(200).json({
     roomId,
     participants: participantEntries.map((entry) => entry.userId),
     participantDetails: participantEntries,
+  });
+});
+
+router.get("/room/:roomId/video-slot/status", (req, res) => {
+  const roomId = typeof req.params.roomId === "string" ? req.params.roomId.trim() : "";
+  const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+
+  const validated = validateJoinLeavePayload({ roomId, userId });
+  if (!validated.ok) {
+    return res.status(400).json({ error: validated.error });
+  }
+
+  if (!assertRoomMemberAccess(roomId, userId, res, { touchPresence: true })) {
+    return;
+  }
+
+  const snapshot = getVideoSlotStatus({ roomId, userId });
+  return res.status(200).json({
+    ok: true,
+    snapshot,
+  });
+});
+
+router.post("/room/video-slot/request", (req, res) => {
+  const validated = validateVideoSlotRequestPayload(req.body);
+  if (!validated.ok) {
+    return res.status(400).json({ error: validated.error });
+  }
+
+  const { roomId, userId, role } = validated.value;
+  if (!assertRoomMemberAccess(roomId, userId, res, { touchPresence: true })) {
+    return;
+  }
+
+  const snapshot = requestVideoSlot({
+    roomId,
+    userId,
+    role: resolveVideoSlotRole(roomId, userId, role),
+  });
+
+  return res.status(200).json({
+    ok: true,
+    snapshot,
+  });
+});
+
+router.post("/room/video-slot/accept", (req, res) => {
+  const validated = validateJoinLeavePayload(req.body);
+  if (!validated.ok) {
+    return res.status(400).json({ error: validated.error });
+  }
+
+  const { roomId, userId } = validated.value;
+  if (!assertRoomMemberAccess(roomId, userId, res, { touchPresence: true })) {
+    return;
+  }
+
+  const accepted = acceptVideoSlotInvite({ roomId, userId });
+  if (!accepted.ok) {
+    return res.status(409).json({
+      ok: false,
+      error: accepted.error,
+      snapshot: accepted.snapshot,
+    });
+  }
+
+  return res.status(200).json({
+    ok: true,
+    snapshot: accepted.snapshot,
+  });
+});
+
+router.post("/room/video-slot/release", (req, res) => {
+  const validated = validateJoinLeavePayload(req.body);
+  if (!validated.ok) {
+    return res.status(400).json({ error: validated.error });
+  }
+
+  const { roomId, userId } = validated.value;
+  if (!assertRoomMemberAccess(roomId, userId, res, { touchPresence: true })) {
+    return;
+  }
+
+  const released = releaseVideoSlot({ roomId, userId });
+  return res.status(200).json({
+    ok: true,
+    removed: released.removed,
+    snapshot: released.snapshot,
   });
 });
 
@@ -385,9 +507,11 @@ router.post("/leave", (req, res) => {
   const { roomId, userId } = validated.value;
   const result = removeUserFromRoom(roomId, userId);
   removeUserPeerId(roomId, userId);
+  removeUserFromVideoSlotRoom(roomId, userId);
 
   if (result.roomDeleted) {
     roomPeerIds.delete(roomId);
+    deleteRoomVideoSlots(roomId);
     deleteRoomPolicy(roomId);
     clearRoomHistory(roomId);
   } else {

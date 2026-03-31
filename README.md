@@ -38,6 +38,8 @@ Optional hardening knobs:
 - RTC_PRESENCE_REAPER_INTERVAL_MS=30000
 - PARTICIPANTS_RATE_LIMIT_MAX_REQUESTS=240
 - RATE_LIMIT_MAX_KEYS=5000
+- MAX_ACTIVE_VIDEO_SLOTS=3
+- VIDEO_SLOT_INVITE_TIMEOUT_MS=10000
 
 Generate VAPID keys once (free web push):
 
@@ -124,6 +126,23 @@ Response:
   "participants": ["user_123", "user_456"]
 }
 ```
+
+### Video Slot Manager (max active camera publishers)
+
+This backend now includes an in-memory video slot manager:
+
+- Max concurrent active camera publishers: `MAX_ACTIVE_VIDEO_SLOTS` (default `3`)
+- Extra camera-on requests are queued using priority + FIFO:
+  - `host` > `speaker` > `participant`
+- When a slot frees, queue head gets a temporary invite (`VIDEO_SLOT_INVITE_TIMEOUT_MS`, default `10s`)
+- If invite times out, user is re-queued and next user is promoted
+
+Endpoints:
+
+- `GET /room/:roomId/video-slot/status?userId=...`
+- `POST /room/video-slot/request` with `{ roomId, userId, role }`
+- `POST /room/video-slot/accept` with `{ roomId, userId }`
+- `POST /room/video-slot/release` with `{ roomId, userId }`
 
 ### PeerJS signaling endpoint
 

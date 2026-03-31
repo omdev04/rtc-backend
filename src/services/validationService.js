@@ -217,6 +217,29 @@ function validatePushUnsubscribePayload(body) {
   };
 }
 
+function validateVideoSlotRequestPayload(body) {
+  const validatedJoinLeave = validateJoinLeavePayload(body);
+  if (!validatedJoinLeave.ok) {
+    return validatedJoinLeave;
+  }
+
+  const rawRole = body && typeof body.role === "string" ? body.role.trim().toLowerCase() : "";
+  const role = rawRole || "participant";
+  const validRoles = new Set(["host", "speaker", "participant", "admin", "owner", "moderator"]);
+
+  if (!validRoles.has(role)) {
+    return { ok: false, error: "Invalid role. Use host, speaker, or participant." };
+  }
+
+  return {
+    ok: true,
+    value: {
+      ...validatedJoinLeave.value,
+      role,
+    },
+  };
+}
+
 module.exports = {
   validateJoinLeavePayload,
   validateAuthorizeRoomPayload,
@@ -226,4 +249,5 @@ module.exports = {
   validateNotificationQuery,
   validatePushSubscribePayload,
   validatePushUnsubscribePayload,
+  validateVideoSlotRequestPayload,
 };

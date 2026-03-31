@@ -11,6 +11,7 @@ const { createRateLimiter } = require("./services/rateLimitService");
 const { clearRoomHistory } = require("./services/chatService");
 const { deleteRoomPolicy } = require("./services/roomPolicyService");
 const { getHealthSnapshot, pruneInactiveParticipants } = require("./services/stateService");
+const { removeUserFromVideoSlotRoom, deleteRoomVideoSlots } = require("./services/videoSlotService");
 
 const app = express();
 
@@ -318,8 +319,15 @@ function startMaintenanceJobs() {
   presenceReaperInterval = setInterval(() => {
     const result = pruneInactiveParticipants({ maxIdleMs: RTC_PRESENCE_MAX_IDLE_MS });
 
+    if (result.removedMembers.length > 0) {
+      for (const member of result.removedMembers) {
+        removeUserFromVideoSlotRoom(member.roomId, member.userId);
+      }
+    }
+
     if (result.prunedRooms > 0) {
       for (const roomId of result.prunedRoomIds) {
+        deleteRoomVideoSlots(roomId);
         deleteRoomPolicy(roomId);
         clearRoomHistory(roomId);
       }

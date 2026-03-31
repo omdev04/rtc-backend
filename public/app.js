@@ -1,9 +1,35 @@
-const API_BASE = window.location.origin;
+const DEFAULT_API_BASE = (() => {
+    const currentPath = window.location.pathname || "/";
+    if (currentPath.endsWith("/index.html")) {
+        return currentPath.slice(0, -"/index.html".length) || "/";
+    }
+    return "/";
+})();
+
+const API_BASE = (window.__RTC_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, "");
+
+function buildApiUrl(path) {
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    if (!API_BASE || API_BASE === "/") {
+        return normalizedPath;
+    }
+    return `${API_BASE}${normalizedPath}`;
+}
+
+async function parseResponsePayload(response) {
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+        return response.json();
+    }
+
+    const text = await response.text();
+    return { error: text || `Request failed with status ${response.status}` };
+}
 
 function checkAuth() {
     const token = localStorage.getItem('authToken');
     if (!token) {
-        window.location.href = '/login.html';
+        window.location.href = buildApiUrl('/login.html');
         return false;
     }
     return true;
@@ -20,7 +46,7 @@ async function fetchWithAuth(url, options = {}) {
     
     if (response.status === 401) {
         localStorage.removeItem('authToken');
-        window.location.href = '/login.html';
+        window.location.href = buildApiUrl('/login.html');
         throw new Error('Unauthorized');
     }
     
@@ -32,12 +58,20 @@ async function loadDashboard() {
 
     try {
         const [healthResponse, statusResponse] = await Promise.all([
-            fetchWithAuth(`${API_BASE}/api/health`),
-            fetchWithAuth(`${API_BASE}/api/status`)
+            fetchWithAuth(buildApiUrl('/api/health')),
+            fetchWithAuth(buildApiUrl('/api/status'))
         ]);
 
-        const health = await healthResponse.json();
-        const status = await statusResponse.json();
+        const health = await parseResponsePayload(healthResponse);
+        const status = await parseResponsePayload(statusResponse);
+
+        if (!healthResponse.ok) {
+            throw new Error(health.error || `Health request failed (${healthResponse.status})`);
+        }
+
+        if (!statusResponse.ok) {
+            throw new Error(status.error || `Status request failed (${statusResponse.status})`);
+        }
 
         document.getElementById('serverStatus').textContent = status.serverStatus;
         document.getElementById('totalRooms').textContent = health.totalRooms;
@@ -74,7 +108,7 @@ document.getElementById('refreshBtn').addEventListener('click', loadDashboard);
 
 document.getElementById('logoutBtn').addEventListener('click', () => {
     localStorage.removeItem('authToken');
-    window.location.href = '/login.html';
+    window.location.href = buildApiUrl('/login.html');
 });
 
 loadDashboard();

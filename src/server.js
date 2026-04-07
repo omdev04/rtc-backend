@@ -28,6 +28,31 @@ function toPositiveNumber(value, fallback) {
   return parsed;
 }
 
+function toBoolean(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 const PORT = Math.floor(toPositiveNumber(process.env.PORT, 3001));
 const PEER_SERVER_PATH = normalizePeerServerPath(process.env.PEER_SERVER_PATH || "/peerjs");
 const allowedOrigins = (process.env.CORS_ORIGINS || "http://localhost:3000,http://127.0.0.1:3000")
@@ -52,6 +77,14 @@ const ROOM_ADMIN_RATE_LIMIT_MAX_REQUESTS = Math.floor(
 );
 const PARTICIPANTS_RATE_LIMIT_MAX_REQUESTS = Math.floor(
   toPositiveNumber(process.env.PARTICIPANTS_RATE_LIMIT_MAX_REQUESTS, 240),
+);
+const ROOM_READ_RATE_LIMIT_MAX_REQUESTS = Math.floor(
+  toPositiveNumber(process.env.ROOM_READ_RATE_LIMIT_MAX_REQUESTS, 300),
+);
+// High-frequency GET polling can overwhelm Upstash command quota if forced through Valkey.
+const RATE_LIMIT_USE_VALKEY_FOR_READ_POLLING = toBoolean(
+  process.env.RATE_LIMIT_USE_VALKEY_FOR_READ_POLLING,
+  false,
 );
 const CHAT_RATE_LIMIT_MAX_REQUESTS = Math.floor(toPositiveNumber(process.env.CHAT_RATE_LIMIT_MAX_REQUESTS, 120));
 const PUSH_RATE_LIMIT_MAX_REQUESTS = Math.floor(toPositiveNumber(process.env.PUSH_RATE_LIMIT_MAX_REQUESTS, 30));
@@ -95,6 +128,14 @@ function isParticipantsRequest(req) {
   }
 
   return /^\/room\/[^/]+\/participants$/.test(getRequestPath(req));
+}
+
+function isVideoSlotStatusRequest(req) {
+  if (req.method !== "GET") {
+    return false;
+  }
+
+  return /^\/room\/[^/]+\/video-slot\/status$/.test(getRequestPath(req));
 }
 
 function getTokenFromAuthorizationHeader(req) {
@@ -232,10 +273,25 @@ const participantsLimiter = createRateLimiter({
   maxRequests: PARTICIPANTS_RATE_LIMIT_MAX_REQUESTS,
   maxEntries: RATE_LIMIT_MAX_KEYS,
   namespace: "participants",
+  useValkey: RATE_LIMIT_USE_VALKEY_FOR_READ_POLLING,
   keyGenerator: (req) => {
     const userId = typeof req.query?.userId === "string" ? req.query.userId.trim() : "";
     if (userId) {
       return `participants:${userId}`;
+    }
+    return req.ip || req.socket?.remoteAddress || "unknown";
+  },
+});
+const roomReadLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: ROOM_READ_RATE_LIMIT_MAX_REQUESTS,
+  maxEntries: RATE_LIMIT_MAX_KEYS,
+  namespace: "room-read",
+  useValkey: RATE_LIMIT_USE_VALKEY_FOR_READ_POLLING,
+  keyGenerator: (req) => {
+    const userId = typeof req.query?.userId === "string" ? req.query.userId.trim() : "";
+    if (userId) {
+      return `room-read:${userId}`;
     }
     return req.ip || req.socket?.remoteAddress || "unknown";
   },
@@ -260,7 +316,7 @@ app.use((req, res, next) => {
     return next();
   }
 
-  if (isParticipantsRequest(req)) {
+  if (isParticipantsRequest(req) || isVideoSlotStatusRequest(req)) {
     return next();
   }
 
@@ -272,6 +328,11 @@ app.use("/room", (req, res, next) => {
   if (isParticipantsRequest(req)) {
     return participantsLimiter(req, res, next);
   }
+
+  if (isVideoSlotStatusRequest(req)) {
+    return roomReadLimiter(req, res, next);
+  }
+
   return roomAdminLimiter(req, res, next);
 });
 app.use("/chat", chatLimiter);

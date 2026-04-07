@@ -8,6 +8,31 @@ function toPositiveNumber(value, fallback) {
   return parsed;
 }
 
+function toBoolean(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
 function defaultKeyGenerator(req) {
   return req.ip || req.socket?.remoteAddress || "unknown";
 }
@@ -99,8 +124,13 @@ function createRateLimiter(options = {}) {
   const namespace = typeof options.namespace === "string" && options.namespace.trim()
     ? options.namespace.trim()
     : "default";
+  const useValkey = toBoolean(options.useValkey, true);
 
   const fallbackLimiter = createInMemoryRateLimiter(options);
+
+  if (!useValkey) {
+    return fallbackLimiter;
+  }
 
   return function rateLimiter(req, res, next) {
     const rawKey = keyGenerator(req);

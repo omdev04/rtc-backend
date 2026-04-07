@@ -200,10 +200,6 @@ function addUserToRoom(roomId, userId) {
     schedulePersistSnapshot();
   }
 
-  if (wasInRoom) {
-    schedulePersistSnapshot();
-  }
-
   return {
     added: !wasInRoom,
     alreadyInRoom: wasInRoom,
@@ -215,8 +211,8 @@ function touchUserInRoom(roomId, userId) {
     return false;
   }
 
+  // Keep heartbeats in memory; persisting every poll would flood Valkey commands.
   markUserSeen(roomId, userId);
-  schedulePersistSnapshot();
   return true;
 }
 
@@ -303,10 +299,6 @@ function pruneInactiveParticipants(options = {}) {
     if (result.roomDeleted) {
       prunedRoomIds.add(staleMember.roomId);
     }
-  }
-
-  if (removedMembers.length > 0) {
-    schedulePersistSnapshot();
   }
 
   return {

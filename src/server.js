@@ -8,10 +8,15 @@ const path = require("path");
 
 const rtcRoutes = require("./routes/rtcRoutes");
 const { createRateLimiter } = require("./services/rateLimitService");
-const { clearRoomHistory } = require("./services/chatService");
-const { deleteRoomPolicy } = require("./services/roomPolicyService");
-const { getHealthSnapshot, pruneInactiveParticipants } = require("./services/stateService");
-const { removeUserFromVideoSlotRoom, deleteRoomVideoSlots } = require("./services/videoSlotService");
+const { initializeChatStore, clearRoomHistory } = require("./services/chatService");
+const { initializeRoomPolicyStore, deleteRoomPolicy } = require("./services/roomPolicyService");
+const { initializeStateStore, getHealthSnapshot, pruneInactiveParticipants } = require("./services/stateService");
+const {
+  initializeVideoSlotStore,
+  removeUserFromVideoSlotRoom,
+  deleteRoomVideoSlots,
+} = require("./services/videoSlotService");
+const { getValkeyStatus, closeValkeyClient } = require("./services/valkeyService");
 
 const app = express();
 
@@ -208,21 +213,25 @@ const globalLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: GLOBAL_RATE_LIMIT_MAX_REQUESTS,
   maxEntries: RATE_LIMIT_MAX_KEYS,
+  namespace: "global",
 });
 const joinLeaveLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: JOIN_LEAVE_RATE_LIMIT_MAX_REQUESTS,
   maxEntries: RATE_LIMIT_MAX_KEYS,
+  namespace: "join-leave",
 });
 const roomAdminLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: ROOM_ADMIN_RATE_LIMIT_MAX_REQUESTS,
   maxEntries: RATE_LIMIT_MAX_KEYS,
+  namespace: "room-admin",
 });
 const participantsLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: PARTICIPANTS_RATE_LIMIT_MAX_REQUESTS,
   maxEntries: RATE_LIMIT_MAX_KEYS,
+  namespace: "participants",
   keyGenerator: (req) => {
     const userId = typeof req.query?.userId === "string" ? req.query.userId.trim() : "";
     if (userId) {
@@ -235,11 +244,13 @@ const chatLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: CHAT_RATE_LIMIT_MAX_REQUESTS,
   maxEntries: RATE_LIMIT_MAX_KEYS,
+  namespace: "chat",
 });
 const pushLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: PUSH_RATE_LIMIT_MAX_REQUESTS,
   maxEntries: RATE_LIMIT_MAX_KEYS,
+  namespace: "push",
 });
 
 app.use((req, res, next) => {
@@ -299,6 +310,7 @@ app.get("/api/status", verifyToken, (_req, res) => {
 app.get("/api/health", verifyToken, (_req, res) => {
   res.json({
     ...getHealthSnapshot(),
+    valkey: getValkeyStatus(),
     auth: {
       mode: "stateless-hmac",
       tokenTtlMs: AUTH_TOKEN_TTL_MS,
@@ -372,7 +384,14 @@ peerServer.on("disconnect", (client) => {
   console.log(`[peer] disconnected: ${id}`);
 });
 
-startMaintenanceJobs();
+async function initializeRuntimeStores() {
+  await Promise.all([
+    initializeStateStore(),
+    initializeRoomPolicyStore(),
+    initializeChatStore(),
+    initializeVideoSlotStore(),
+  ]);
+}
 
 function stopMaintenanceJobs() {
   if (presenceReaperInterval) {
@@ -386,10 +405,23 @@ server.on("error", (error) => {
   shutdown("serverError", 1);
 });
 
-server.listen(PORT, () => {
-  console.log(`RTC backend listening on port ${PORT}`);
-  console.log(`PeerJS signaling available at ${PEER_SERVER_PATH}`);
-});
+initializeRuntimeStores()
+  .catch((error) => {
+    console.error("Failed to initialize runtime stores. Starting with in-memory fallback.", error);
+  })
+  .finally(() => {
+    startMaintenanceJobs();
+    server.listen(PORT, () => {
+      console.log(`RTC backend listening on port ${PORT}`);
+      console.log(`PeerJS signaling available at ${PEER_SERVER_PATH}`);
+      const valkey = getValkeyStatus();
+      if (valkey.configured) {
+        console.log(`[valkey] enabled (prefix: ${valkey.keyPrefix})`);
+      } else {
+        console.log(`[valkey] disabled (${valkey.disabledReason || "unknown reason"})`);
+      }
+    });
+  });
 
 let shuttingDown = false;
 
@@ -403,8 +435,17 @@ function shutdown(signal, exitCode = 0) {
 
   stopMaintenanceJobs();
 
+  async function finalizeExit(code) {
+    try {
+      await closeValkeyClient();
+    } catch {
+      // Ignore shutdown close failures.
+    }
+    process.exit(code);
+  }
+
   if (!server.listening) {
-    process.exit(exitCode);
+    void finalizeExit(exitCode);
     return;
   }
 
@@ -419,16 +460,16 @@ function shutdown(signal, exitCode = 0) {
 
     if (error) {
       if (error.code === "ERR_SERVER_NOT_RUNNING") {
-        process.exit(exitCode);
+        void finalizeExit(exitCode);
         return;
       }
 
       console.error("Error while closing server:", error);
-      process.exit(1);
+      void finalizeExit(1);
       return;
     }
 
-    process.exit(exitCode);
+    void finalizeExit(exitCode);
   });
 }
 

@@ -1,4 +1,4 @@
-# RTC Backend (PeerJS + In-Memory State)
+# RTC Backend (PeerJS + Valkey-Optional State)
 
 Lightweight control layer for PeerJS-based browser-to-browser calls using Node.js + Express.
 
@@ -8,14 +8,21 @@ Lightweight control layer for PeerJS-based browser-to-browser calls using Node.j
 - Express
 - peer
 - dotenv
+- ioredis (Valkey/Redis compatible)
 
-## Important Limitation
+## Persistence Model
 
-This backend uses in-memory storage:
+This backend supports two runtime modes:
 
-- All room/user state resets on restart
-- Not suitable for multi-instance horizontal scaling
-- Includes stale participant cleanup for long-running calls
+- Valkey mode (recommended for production):
+  - Room/user presence, room policy, chat history, video-slot state, and rate limits are shared and survive restarts.
+- In-memory fallback mode:
+  - If Valkey is not configured or temporarily unavailable, backend continues running with in-memory state.
+
+Notes:
+
+- In-memory fallback resets on restart.
+- Stale participant cleanup is active in both modes.
 
 ## Environment
 
@@ -30,6 +37,12 @@ Copy `.env.example` to `.env` and fill values:
 - VAPID_PRIVATE_KEY=<private key>
 - VAPID_SUBJECT=mailto:security@example.com
 - PORT=3001
+- VALKEY_ENABLED=true
+- VALKEY_DRIVER=rest
+- VALKEY_REST_URL=https://light-snake-92731.upstash.io
+- VALKEY_REST_TOKEN=<upstash token>
+- VALKEY_URL=redis://:your_valkey_password@zara2122-tagvelky.hf.space:6379/0
+- VALKEY_KEY_PREFIX=tagowls:rtc
 
 Optional hardening knobs:
 
@@ -40,6 +53,10 @@ Optional hardening knobs:
 - RATE_LIMIT_MAX_KEYS=5000
 - MAX_ACTIVE_VIDEO_SLOTS=3
 - VIDEO_SLOT_INVITE_TIMEOUT_MS=10000
+- VALKEY_CONNECT_TIMEOUT_MS=2500
+
+If `VALKEY_DRIVER=rest`, backend uses Upstash REST credentials (`VALKEY_REST_URL`, `VALKEY_REST_TOKEN`).
+If `VALKEY_DRIVER=tcp` or `auto` without REST config, backend uses `VALKEY_URL` or `VALKEY_HOST` + `VALKEY_PORT` + `VALKEY_PASSWORD`.
 
 Generate VAPID keys once (free web push):
 
@@ -129,7 +146,7 @@ Response:
 
 ### Video Slot Manager (max active camera publishers)
 
-This backend now includes an in-memory video slot manager:
+This backend includes a video slot manager (persisted in Valkey when enabled):
 
 - Max concurrent active camera publishers: `MAX_ACTIVE_VIDEO_SLOTS` (default `3`)
 - Extra camera-on requests are queued using priority + FIFO:
@@ -182,14 +199,14 @@ Body:
 Behavior:
 
 - User must be authorized for room and currently joined.
-- Stores in-memory room chat message.
+- Stores room chat message (Valkey-backed when enabled, memory fallback otherwise).
 
 ### GET /chat/history?roomId=room_123&userId=user_456&limit=60
 
 Behavior:
 
 - User must be authorized for room.
-- Returns recent in-memory room messages.
+- Returns recent room messages.
 
 ### GET /health
 
@@ -199,6 +216,13 @@ Response:
 {
   "totalRooms": 2,
   "totalUsers": 8,
+  "valkey": {
+    "configured": true,
+    "connected": true,
+    "usingFallback": false,
+    "clientStatus": "ready",
+    "keyPrefix": "tagowls:rtc"
+  },
   "usersPerRoom": {
     "room_123": 5,
     "room_abc": 3

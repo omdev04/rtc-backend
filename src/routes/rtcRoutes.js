@@ -2,11 +2,12 @@ const crypto = require("crypto");
 const express = require("express");
 
 const {
-  rooms,
-  globalUsers,
   addUserToRoom,
+  getGlobalUsersCount,
   getRoomUsers,
+  getRoomSize,
   getHealthSnapshot,
+  isKnownGlobalUser,
   isUserInRoom,
   removeUserFromRoom,
   touchUserInRoom,
@@ -469,8 +470,7 @@ router.post("/join", (req, res) => {
     });
   }
 
-  const room = rooms.get(roomId);
-  const roomSize = room ? room.size : 0;
+  const roomSize = getRoomSize(roomId);
   if (roomSize >= MAX_USERS_PER_ROOM) {
     return res.status(403).json({
       error: "Room user limit exceeded",
@@ -478,8 +478,8 @@ router.post("/join", (req, res) => {
     });
   }
 
-  const isGlobalNewUser = !globalUsers.has(userId);
-  if (isGlobalNewUser && globalUsers.size >= MAX_GLOBAL_USERS) {
+  const isGlobalNewUser = !isKnownGlobalUser(userId);
+  if (isGlobalNewUser && getGlobalUsersCount() >= MAX_GLOBAL_USERS) {
     return res.status(403).json({
       error: "Global user limit exceeded",
       limit: MAX_GLOBAL_USERS,

@@ -39,9 +39,9 @@ Copy `.env.example` to `.env` and fill values:
 - PORT=3001
 - VALKEY_ENABLED=true
 - VALKEY_DRIVER=rest
-- VALKEY_REST_URL=https://light-snake-92731.upstash.io
+- VALKEY_REST_URL=
 - VALKEY_REST_TOKEN=<upstash token>
-- VALKEY_URL=redis://:your_valkey_password@zara2122-tagvelky.hf.space:6379/0
+- VALKEY_URL=
 - VALKEY_KEY_PREFIX=tagowls:rtc
 
 Optional hardening knobs:
